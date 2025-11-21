@@ -249,6 +249,59 @@ V4L2_PIX_FMT_RGB24 = v4l2_fourcc('R', 'G', 'B', '3')
 V4L2_PIX_FMT_BGR24 = v4l2_fourcc('B', 'G', 'R', '3')
 V4L2_PIX_FMT_RX24 = v4l2_fourcc('R', 'X', '2', '4')
 
+PRIMARY_FORMAT_ORDER = [
+    'YUV422',
+    'YUV420',
+    '888RGB',
+    '565RGB',
+    '555RGB',
+    'JPEG',
+    'RAW10',
+    'RAW14',
+]
+
+PRIMARY_FORMAT_GROUPS = {
+    'YUV422': {'YUYV', 'YVYU', 'UYVY'},
+    'YUV420': {'NV12', 'NV21', 'YU12', 'YV12'},
+    '888RGB': {'RGB3', 'BGR3', 'RX24'},
+    '565RGB': {'RGBP'},
+    '555RGB': {'RGBO', 'RGBQ'},
+    'JPEG': {'MJPG', 'JPEG'},
+    'RAW10': {'RG10', 'GR10', 'GB10', 'BG10', 'BA10', 'Y10 '},
+    'RAW14': {'RG14', 'GR14', 'GB14', 'BG14', 'BA14', 'GA14', 'RA14', 'Y14 '},
+}
+
+PRIMARY_FORMAT_PRIORITY = {
+    name: idx for idx, name in enumerate(PRIMARY_FORMAT_ORDER)
+}
+
+PIXEL_FORMAT_TO_GROUP = {}
+for group, codes in PRIMARY_FORMAT_GROUPS.items():
+    for code in codes:
+        PIXEL_FORMAT_TO_GROUP[code] = group
+
+
+def get_primary_format_group(fourcc_str):
+    return PIXEL_FORMAT_TO_GROUP.get(fourcc_str)
+
+
+def format_display_name(fourcc_str):
+    group = get_primary_format_group(fourcc_str)
+    if group:
+        return f'{group} ({fourcc_str})'
+    return fourcc_str
+
+
+def fmt_sort_key(fourcc_str):
+    group = get_primary_format_group(fourcc_str)
+    if group:
+        return (
+            0,
+            PRIMARY_FORMAT_PRIORITY.get(group, len(PRIMARY_FORMAT_ORDER)),
+            fourcc_str,
+        )
+    return (1, fourcc_str)
+
 
 V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
 V4L2_MEMORY_MMAP = 1
@@ -2112,7 +2165,7 @@ class V4L2FmtCtrls:
 
         # must reopen the fd, because changing these lock the device, and can't be open by another processes
         self.pxf_ctrl = BaseCtrl('pixelformat', 'Pixel Format', 'menu', pixelformat, reopener=True, tooltip='Output pixel format', menu=[
-            BaseCtrlMenu(fmt, fmt, None) for fmt in fmts
+            BaseCtrlMenu(fmt, format_display_name(fmt), None) for fmt in fmts
         ])
 
         self.ctrls = [
@@ -2247,7 +2300,7 @@ class V4L2FmtCtrls:
                 break
             fmts.append(pxf2str(fmt.pixelformat))
             fmt.index += 1
-        return fmts
+        return sorted(fmts, key=fmt_sort_key)
 
     def get_resolutions(self, pixelformat):
         resolutions = []
