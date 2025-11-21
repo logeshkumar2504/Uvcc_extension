@@ -486,6 +486,7 @@ class V4L2Camera(Thread):
         self.is_recording = False
         self.ffmpeg_process = None
         self.recording_framerate = 30  # Default framerate, can be adjusted
+        self.recording_frame_processor = None
 
         try:
             self.fd = os.open(self.device, os.O_RDWR, 0)
@@ -559,6 +560,59 @@ class V4L2Camera(Thread):
 
             self.cap_bufs.append(buf)
 
+    def _build_ffmpeg_video_input(self, framerate):
+        raw_pix_fmt_map = {
+            V4L2_PIX_FMT_YUYV: 'yuyv422',
+            V4L2_PIX_FMT_YVYU: 'yvyu422',
+            V4L2_PIX_FMT_UYVY: 'uyvy422',
+            V4L2_PIX_FMT_NV12: 'nv12',
+            V4L2_PIX_FMT_NV21: 'nv21',
+            V4L2_PIX_FMT_YU12: 'yuv420p',
+            V4L2_PIX_FMT_YV12: 'yuv420p',
+            V4L2_PIX_FMT_RGB24: 'rgb24',
+            V4L2_PIX_FMT_BGR24: 'bgr24',
+            V4L2_PIX_FMT_RGB565: 'rgb565le',
+            V4L2_PIX_FMT_GREY: 'gray',
+        }
+
+        if self.pixelformat in (V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_JPEG):
+            return {
+                'format': 'mjpeg',
+                'framerate': framerate,
+            }, None
+
+        pix_fmt = raw_pix_fmt_map.get(self.pixelformat)
+        if pix_fmt is None:
+            raise ValueError(f'Unsupported pixel format 0x{self.pixelformat:x} for recording')
+
+        input_kwargs = {
+            'format': 'rawvideo',
+            'pix_fmt': pix_fmt,
+            's': f'{self.width}x{self.height}',
+            'framerate': framerate,
+        }
+
+        frame_processor = self._swap_yv12_planes if self.pixelformat == V4L2_PIX_FMT_YV12 else None
+        return input_kwargs, frame_processor
+
+    def _swap_yv12_planes(self, buf):
+        y_size = self.width * self.height
+        chroma_size = y_size // 4
+        expected = y_size + (2 * chroma_size)
+        frame = bytes(buf.buffer[:buf.bytesused])
+        if len(frame) < expected:
+            logging.warning('YV12 frame smaller than expected, skipping UV swap')
+            return frame
+        y = frame[:y_size]
+        v = frame[y_size:y_size + chroma_size]
+        u = frame[y_size + chroma_size:y_size + (2 * chroma_size)]
+        return y + u + v
+
+    def _prepare_frame_for_recording(self, buf):
+        if self.recording_frame_processor:
+            return self.recording_frame_processor(buf)
+        return bytes(buf.buffer[:buf.bytesused])
+
     def start_recording(self, output_file="output.mp4", framerate=30, include_audio=True):
         if self.is_recording:
             logging.warning("Already recording.")
@@ -571,8 +625,9 @@ class V4L2Camera(Thread):
         self.recording_framerate = framerate
 
         try:
-            video_input = ffmpeg.input('pipe:', format='rawvideo', pix_fmt='yuyv422', 
-                                    s=f'{self.width}x{self.height}', framerate=framerate)
+            video_input_kwargs, frame_processor = self._build_ffmpeg_video_input(framerate)
+            video_input = ffmpeg.input('pipe:', **video_input_kwargs)
+            self.recording_frame_processor = frame_processor
 
             if include_audio:
                 audio_input = ffmpeg.input('default', format='alsa', ac=1, ar=44100)
@@ -597,6 +652,7 @@ class V4L2Camera(Thread):
             except Exception as e:
                 logging.error(f"Error stopping FFmpeg: {e}")
         self.is_recording = False
+        self.recording_frame_processor = None
         logging.info("Recording stopped.")
 
     def capture_loop(self):
@@ -645,7 +701,7 @@ class V4L2Camera(Thread):
             # Record frame if recording is active
             if self.is_recording and self.ffmpeg_process:
                 try:
-                    frame_data = bytes(buf.buffer[:buf.bytesused])  # Raw YUYV422 data
+                    frame_data = self._prepare_frame_for_recording(buf)
                     self.ffmpeg_process.stdin.write(frame_data)
                 except Exception as e:
                     logging.error(f"Failed to write frame to FFmpeg: {e}")
